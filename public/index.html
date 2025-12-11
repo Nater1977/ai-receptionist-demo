@@ -6,28 +6,126 @@
 <body>
   <h2>Checkered Flag Auto Center – AI Receptionist Test</h2>
   <button id="start">Start Receptionist</button>
+
   <script>
+    let audioCtx, ws, source, processor;
+
     document.getElementById("start").onclick = async () => {
-      const ws = new WebSocket("wss://" + location.host);
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-      ws.onopen = () => {
-        console.log("Connected.");
+      // 1) Connect WS
+      ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = async () => {
+        console.log("WebSocket open, ready to send audio.");
+
+        // 2) Capture microphone
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        source = audioCtx.createMediaStreamSource(stream);
+
+        // 3) Create ScriptProcessor
+        processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+        processor.onaudioprocess = (e) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const float32 = e.inputBuffer.getChannelData(0);
+          const resampled = resampleFloat32(float32, audioCtx.sampleRate, 24000);
+          const pcm16 = floatTo16BitPCM(resampled);
+          const b64 = int16ToBase64(pcm16);
+          ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64 }));
+        };
+
+        source.connect(processor);
+        processor.connect(audioCtx.destination);
+
+        // 4) Periodically commit audio & request AI response
+        setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+            ws.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio", "text"] } }));
+          }
+        }, 1000);
       };
 
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        console.log(msg);
+      // 5) Play incoming AI audio
+      ws.onmessage = (evt) => {
+        if (typeof evt.data === "string") {
+          try {
+            const msg = JSON.parse(evt.data);
+            const b64 = msg?.delta || msg?.audio || null;
+            if (msg.type?.startsWith("response.audio") && b64) {
+              const pcm16 = base64ToInt16(b64);
+              playPCM(pcm16, 24000);
+              return;
+            }
+          } catch {}
+        } else if (evt.data instanceof ArrayBuffer) {
+          const pcm16 = new Int16Array(evt.data);
+          playPCM(pcm16, 24000);
+        }
       };
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const processor = new MediaRecorder(stream, { mimeType: "audio/webm" });
-
-      processor.ondataavailable = (e) => {
-        ws.send(e.data);
-      };
-
-      processor.start(100);
     };
+
+    // --- Helpers ---
+    function floatTo16BitPCM(float32Array) {
+      const l = float32Array.length;
+      const int16 = new Int16Array(l);
+      for (let i = 0; i < l; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return int16;
+    }
+
+    function int16ToBase64(int16Arr) {
+      const byteArray = new Uint8Array(int16Arr.buffer);
+      let binary = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < byteArray.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, byteArray.subarray(i, i + chunk));
+      }
+      return btoa(binary);
+    }
+
+    function base64ToInt16(b64) {
+      const binary = atob(b64);
+      const len = binary.length;
+      const arr = new Int16Array(len / 2);
+      for (let i = 0; i < arr.length; i++) {
+        arr[i] = (binary.charCodeAt(i*2+1) << 8) | binary.charCodeAt(i*2);
+      }
+      return arr;
+    }
+
+    function playPCM(int16Array, sampleRate) {
+      const float32 = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) {
+        float32[i] = int16Array[i] / 32768;
+      }
+      const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+      audioBuffer.copyToChannel(float32, 0);
+      const src = audioCtx.createBufferSource();
+      src.buffer = audioBuffer;
+      src.connect(audioCtx.destination);
+      src.start();
+    }
+
+    function resampleFloat32(input, inputRate, outputRate) {
+      if (inputRate === outputRate) return input;
+      const ratio = inputRate / outputRate;
+      const outLength = Math.round(input.length / ratio);
+      const out = new Float32Array(outLength);
+      for (let i = 0; i < outLength; i++) {
+        const pos = i * ratio;
+        const iPos = Math.floor(pos);
+        const frac = pos - iPos;
+        const s0 = input[iPos] || 0;
+        const s1 = input[iPos+1] || 0;
+        out[i] = s0 + (s1 - s0)*frac;
+      }
+      return out;
+    }
   </script>
 </body>
 </html>
