@@ -7,6 +7,7 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
+// --- AI CONFIG ---
 const SYSTEM_PROMPT = `
 You are the AI receptionist for Checkered Flag Auto Center.
 
@@ -26,48 +27,53 @@ Your job:
 Tone: friendly, professional, clear.
 `;
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const client = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // Serve frontend
 app.use(express.static("public"));
 
-// --- Realtime WS bridge ---
+// --- REALTIME WEBSOCKET BRIDGE ---
 wss.on("connection", async (clientSocket) => {
   try {
-    // 1. Create a Realtime session using latest SDK
-    const session = await client.realtime.sessions.create({
+    // 1) Create Realtime session with audio + text
+    const session = await client.sessions.createRealtimeSession({
       model: "gpt-4o-realtime-preview-2024-12-17",
       instructions: SYSTEM_PROMPT,
-      voice: "alloy",
-      modalities: ["audio", "text"],
+      voice: "alloy",               // valid voice
+      modalities: ["text", "audio"] // must include audio
     });
 
-    // 2. Connect to OpenAI WS
+    console.log("Realtime session created:", session.websocket_url);
+
+    // 2) Connect to OpenAI Realtime WS
     const aiSocket = new WebSocket(session.websocket_url, {
       headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     });
 
-    // 3. Forward OpenAI → Browser
-    aiSocket.on("message", (msg) => {
-      if (clientSocket.readyState === WebSocket.OPEN) {
-        clientSocket.send(msg);
-      }
-    });
-
-    // 4. Forward Browser → OpenAI
+    // 3) Browser → OpenAI
     clientSocket.on("message", (msg) => {
-      if (aiSocket.readyState === WebSocket.OPEN) {
-        aiSocket.send(msg);
+      aiSocket.send(msg);
+
+      // Whenever browser sends audio, also request AI response
+      const parsed = JSON.parse(msg);
+      if (parsed.type === "input_audio_buffer.commit") {
+        aiSocket.send(JSON.stringify({
+          type: "response.create",
+          response: { modalities: ["audio", "text"] }
+        }));
       }
     });
 
-    // 5. Cleanup
-    const closeAll = () => {
-      if (clientSocket.readyState === WebSocket.OPEN) clientSocket.close();
-      if (aiSocket.readyState === WebSocket.OPEN) aiSocket.close();
-    };
-    clientSocket.on("close", closeAll);
-    aiSocket.on("close", closeAll);
+    // 4) OpenAI → Browser
+    aiSocket.on("message", (msg) => {
+      clientSocket.send(msg);
+    });
+
+    // 5) Cleanup on disconnect
+    clientSocket.on("close", () => aiSocket.close());
+    aiSocket.on("close", () => clientSocket.close());
 
   } catch (err) {
     console.error("Realtime session error:", err);
@@ -75,5 +81,7 @@ wss.on("connection", async (clientSocket) => {
 });
 
 server.listen(process.env.PORT || 3000, () => {
-  console.log(`AI receptionist demo running at http://localhost:${process.env.PORT || 3000}`);
+  console.log(
+    `AI receptionist demo running at http://localhost:${process.env.PORT || 3000}`
+  );
 });
