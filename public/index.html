@@ -9,23 +9,24 @@
 
   <script>
     let audioCtx, ws, source, processor;
+    const targetRate = 24000;
 
     document.getElementById("start").onclick = async () => {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const targetRate = 24000;
+      await audioCtx.resume(); // ensure AudioContext is running
 
-      // 1) Connect WS
+      // 1) Connect WebSocket
       ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host);
       ws.binaryType = "arraybuffer";
 
       ws.onopen = async () => {
         console.log("WebSocket open, ready to send audio.");
 
-        // 2) Capture mic
+        // 2) Capture microphone
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
 
-        // 3) ScriptProcessor for audio
+        // 3) Create ScriptProcessor (deprecated but works)
         processor = audioCtx.createScriptProcessor(4096, 1, 1);
 
         processor.onaudioprocess = (e) => {
@@ -49,24 +50,23 @@
         }, 1000);
       };
 
-      // 5) Play AI audio
+      // 5) Play AI audio safely
       ws.onmessage = (evt) => {
-  if (typeof evt.data === "string") {
-    try {
-      const msg = JSON.parse(evt.data);
+        if (typeof evt.data === "string" && evt.data.trim() !== "") {
+          try {
+            const msg = JSON.parse(evt.data);
 
-      // Check if this is AI audio
-      if (msg.type?.startsWith("response.audio") && msg.audio) {
-        const pcm16 = base64ToInt16(msg.audio);
-        playPCM(pcm16, 24000);
-      }
-
-    } catch (err) {
-      console.error("Failed to parse WS message:", err);
-    }
-  }
-};
-
+            // Only handle AI audio messages
+            if (msg.type?.startsWith("response.audio") && msg.audio) {
+              const pcm16 = base64ToInt16(msg.audio);
+              playPCM(pcm16, targetRate);
+            }
+          } catch (err) {
+            console.error("Failed to parse WS message:", err, evt.data);
+          }
+        }
+      };
+    };
 
     // --- Helpers ---
     function floatTo16BitPCM(float32Array) {
@@ -74,7 +74,7 @@
       const int16 = new Int16Array(l);
       for (let i = 0; i < l; i++) {
         let s = Math.max(-1, Math.min(1, float32Array[i]));
-        int16[i] = s < 0 ? s*0x8000 : s*0x7fff;
+        int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
       }
       return int16;
     }
@@ -83,44 +83,44 @@
       const byteArray = new Uint8Array(int16Arr.buffer);
       let binary = "";
       const chunk = 0x8000;
-      for (let i=0;i<byteArray.length;i+=chunk) {
-        binary += String.fromCharCode.apply(null, byteArray.subarray(i,i+chunk));
+      for (let i = 0; i < byteArray.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, byteArray.subarray(i, i + chunk));
       }
       return btoa(binary);
     }
 
     function base64ToInt16(b64) {
       const binary = atob(b64);
-      const arr = new Int16Array(binary.length/2);
-      for (let i=0;i<arr.length;i++) {
-        arr[i] = (binary.charCodeAt(i*2+1)<<8) | binary.charCodeAt(i*2);
+      const arr = new Int16Array(binary.length / 2);
+      for (let i = 0; i < arr.length; i++) {
+        arr[i] = (binary.charCodeAt(i * 2 + 1) << 8) | binary.charCodeAt(i * 2);
       }
       return arr;
     }
 
     function playPCM(int16Array, sampleRate) {
       const float32 = new Float32Array(int16Array.length);
-      for (let i=0;i<int16Array.length;i++) float32[i] = int16Array[i]/32768;
-      const audioBuffer = audioCtx.createBuffer(1,float32.length,sampleRate);
-      audioBuffer.copyToChannel(float32,0);
+      for (let i = 0; i < int16Array.length; i++) float32[i] = int16Array[i] / 32768;
+      const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+      audioBuffer.copyToChannel(float32, 0);
       const src = audioCtx.createBufferSource();
       src.buffer = audioBuffer;
       src.connect(audioCtx.destination);
       src.start();
     }
 
-    function resampleFloat32(input,inputRate,outputRate) {
-      if(inputRate===outputRate) return input;
-      const ratio=inputRate/outputRate;
-      const outLength=Math.round(input.length/ratio);
-      const out=new Float32Array(outLength);
-      for(let i=0;i<outLength;i++){
-        const pos=i*ratio;
-        const iPos=Math.floor(pos);
-        const frac=pos-iPos;
-        const s0=input[iPos]||0;
-        const s1=input[iPos+1]||0;
-        out[i]=s0+(s1-s0)*frac;
+    function resampleFloat32(input, inputRate, outputRate) {
+      if (inputRate === outputRate) return input;
+      const ratio = inputRate / outputRate;
+      const outLength = Math.round(input.length / ratio);
+      const out = new Float32Array(outLength);
+      for (let i = 0; i < outLength; i++) {
+        const pos = i * ratio;
+        const iPos = Math.floor(pos);
+        const frac = pos - iPos;
+        const s0 = input[iPos] || 0;
+        const s1 = input[iPos + 1] || 0;
+        out[i] = s0 + (s1 - s0) * frac;
       }
       return out;
     }
