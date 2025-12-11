@@ -37,41 +37,45 @@ app.use(express.static("public"));
 // --- REALTIME WEBSOCKET BRIDGE ---
 wss.on("connection", async (clientSocket) => {
   try {
-    // 1) Create Realtime session with audio + text
+    // 1) Create Realtime session with text + audio
     const session = await client.sessions.createRealtimeSession({
       model: "gpt-4o-realtime-preview-2024-12-17",
       instructions: SYSTEM_PROMPT,
-      voice: "alloy",               // valid voice
-      modalities: ["text", "audio"] // must include audio
+      voice: "alloy",
+      modalities: ["text", "audio"]
     });
 
     console.log("Realtime session created:", session.websocket_url);
 
-    // 2) Connect to OpenAI Realtime WS
+    // 2) Connect to OpenAI Realtime WebSocket
     const aiSocket = new WebSocket(session.websocket_url, {
       headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     });
 
-    // 3) Browser → OpenAI
+    // 3) Forward messages: Browser → OpenAI
     clientSocket.on("message", (msg) => {
       aiSocket.send(msg);
 
-      // Whenever browser sends audio, also request AI response
-      const parsed = JSON.parse(msg);
-      if (parsed.type === "input_audio_buffer.commit") {
-        aiSocket.send(JSON.stringify({
-          type: "response.create",
-          response: { modalities: ["audio", "text"] }
-        }));
+      // Whenever browser commits audio, immediately request AI response
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed.type === "input_audio_buffer.commit") {
+          aiSocket.send(JSON.stringify({
+            type: "response.create",
+            response: { modalities: ["audio", "text"] }
+          }));
+        }
+      } catch (err) {
+        console.error("Failed to parse client message:", err);
       }
     });
 
-    // 4) OpenAI → Browser
+    // 4) Forward messages: OpenAI → Browser
     aiSocket.on("message", (msg) => {
       clientSocket.send(msg);
     });
 
-    // 5) Cleanup on disconnect
+    // 5) Clean up on disconnect
     clientSocket.on("close", () => aiSocket.close());
     aiSocket.on("close", () => clientSocket.close());
 
@@ -81,7 +85,5 @@ wss.on("connection", async (clientSocket) => {
 });
 
 server.listen(process.env.PORT || 3000, () => {
-  console.log(
-    `AI receptionist demo running at http://localhost:${process.env.PORT || 3000}`
-  );
+  console.log(`AI receptionist demo running at http://localhost:${process.env.PORT || 3000}`);
 });
