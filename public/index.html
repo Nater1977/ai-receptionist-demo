@@ -1,81 +1,33 @@
-<script>
-  let audioContext;
-  let ws;
-  let mediaRecorder;
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AI Receptionist Demo</title>
+</head>
+<body>
+  <h2>Checkered Flag Auto Center – AI Receptionist Test</h2>
+  <button id="start">Start Receptionist</button>
+  <script>
+    document.getElementById("start").onclick = async () => {
+      const ws = new WebSocket("wss://" + location.host);
 
-  document.getElementById("start").onclick = async () => {
-    // --- SETUP AUDIO CONTEXT ---
-    audioContext = new AudioContext({ sampleRate: 24000 });
+      ws.onopen = () => {
+        console.log("Connected.");
+      };
 
-    // --- CONNECT TO SERVER ---
-    ws = new WebSocket("wss://" + location.host);
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        console.log(msg);
+      };
 
-    ws.binaryType = "arraybuffer";
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const processor = new MediaRecorder(stream, { mimeType: "audio/webm" });
 
-    ws.onopen = () => {
-      console.log("Connected to backend WebSocket");
-    };
-
-    ws.onmessage = (event) => {
-      // Try JSON first
-      try {
-        const json = JSON.parse(event.data);
-
-        if (json.type === "response.audio.delta") {
-          // Base64 PCM16 from OpenAI
-          const pcmBytes = atob(json.delta);
-          const buffer = new Int16Array(pcmBytes.length / 2);
-
-          for (let i = 0; i < buffer.length; i++) {
-            buffer[i] =
-              pcmBytes.charCodeAt(i * 2) |
-              (pcmBytes.charCodeAt(i * 2 + 1) << 8);
-          }
-
-          playAudioPCM(buffer);
-          return;
-        }
-
-        console.log(json);
-      } catch {
-        // This is binary audio from your server → pass through
-        const pcm = new Int16Array(event.data);
-        playAudioPCM(pcm);
-      }
-    };
-
-    // --- MIC CAPTURE ---
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-    mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (ws.readyState === WebSocket.OPEN) {
+      processor.ondataavailable = (e) => {
         ws.send(e.data);
-      }
+      };
+
+      processor.start(100);
     };
-
-    mediaRecorder.start(100);
-  };
-
-  // --- PLAY PCM16 AUDIO WITH WEB AUDIO API ---
-  function playAudioPCM(int16Array) {
-    const float32 = new Float32Array(int16Array.length);
-    for (let i = 0; i < int16Array.length; i++) {
-      float32[i] = int16Array[i] / 32768; // convert PCM16 → float
-    }
-
-    const audioBuffer = audioContext.createBuffer(
-      1,
-      float32.length,
-      24000
-    );
-
-    audioBuffer.copyToChannel(float32, 0);
-
-    const src = audioContext.createBufferSource();
-    src.buffer = audioBuffer;
-    src.connect(audioContext.destination);
-    src.start();
-  }
-</script>
+  </script>
+</body>
+</html>
