@@ -1,79 +1,129 @@
-import express from "express";
-import { createServer } from "http";
-import { WebSocketServer } from "ws";
-import OpenAI from "openai";
+<!DOCTYPE html>
+<html>
+<head>
+  <title>AI Receptionist Demo</title>
+</head>
+<body>
+  <h2>Checkered Flag Auto Center – AI Receptionist Test</h2>
+  <button id="start">Start Receptionist</button>
 
-const app = express();
-const server = createServer(app);
-const wss = new WebSocketServer({ server });
+  <script>
+    let audioCtx, ws, source, processor;
 
-const SYSTEM_PROMPT = `
-You are the AI receptionist for Checkered Flag Auto Center.
+    document.getElementById("start").onclick = async () => {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const targetRate = 24000;
 
-Business: Checkered Flag Auto Center
-Hours: Mon–Fri 8am–6pm, Sat 9am–1pm, Sun closed.
+      // 1) Connect WS
+      ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host);
+      ws.binaryType = "arraybuffer";
 
-Services: General repair, diagnostics, brakes, oil change, engines, electrical, tires, state inspection, light diesel.
+      ws.onopen = async () => {
+        console.log("WebSocket open, ready to send audio.");
 
-Your job:
-- Answer calls professionally.
-- Ask for year/make/model.
-- Ask what the issue is.
-- Ask when they’d like to come in.
-- Ask for name and phone number.
-- Summarize the lead.
+        // 2) Capture mic
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        source = audioCtx.createMediaStreamSource(stream);
 
-Tone: friendly, professional, clear.
-`;
+        // 3) ScriptProcessor for audio
+        processor = audioCtx.createScriptProcessor(4096, 1, 1);
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        processor.onaudioprocess = (e) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          const float32 = e.inputBuffer.getChannelData(0);
+          const resampled = resampleFloat32(float32, audioCtx.sampleRate, targetRate);
+          const pcm16 = floatTo16BitPCM(resampled);
+          const b64 = int16ToBase64(pcm16);
+          ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64 }));
+        };
 
-// Serve frontend
-app.use(express.static("public"));
+        source.connect(processor);
+        processor.connect(audioCtx.destination);
 
-// --- Realtime WS bridge ---
-wss.on("connection", async (clientSocket) => {
-  try {
-    // 1. Create a Realtime session using latest SDK
-    const session = await client.realtime.sessions.create({
-      model: "gpt-4o-realtime-preview-2024-12-17",
-      instructions: SYSTEM_PROMPT,
-      voice: "alloy",
-      modalities: ["audio", "text"],
-    });
+        // 4) Periodically commit audio + request AI response
+        setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+            ws.send(JSON.stringify({ type: "response.create", response: { modalities: ["audio","text"] } }));
+          }
+        }, 1000);
+      };
 
-    // 2. Connect to OpenAI WS
-    const aiSocket = new WebSocket(session.websocket_url, {
-      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-    });
-
-    // 3. Forward OpenAI → Browser
-    aiSocket.on("message", (msg) => {
-      if (clientSocket.readyState === WebSocket.OPEN) {
-        clientSocket.send(msg);
-      }
-    });
-
-    // 4. Forward Browser → OpenAI
-    clientSocket.on("message", (msg) => {
-      if (aiSocket.readyState === WebSocket.OPEN) {
-        aiSocket.send(msg);
-      }
-    });
-
-    // 5. Cleanup
-    const closeAll = () => {
-      if (clientSocket.readyState === WebSocket.OPEN) clientSocket.close();
-      if (aiSocket.readyState === WebSocket.OPEN) aiSocket.close();
+      // 5) Play AI audio
+      ws.onmessage = (evt) => {
+        if (typeof evt.data === "string") {
+          try {
+            const msg = JSON.parse(evt.data);
+            const b64 = msg?.delta || msg?.audio || null;
+            if (msg.type?.startsWith("response.audio") && b64) {
+              const pcm16 = base64ToInt16(b64);
+              playPCM(pcm16, targetRate);
+              return;
+            }
+          } catch {}
+        } else if (evt.data instanceof ArrayBuffer) {
+          const pcm16 = new Int16Array(evt.data);
+          playPCM(pcm16, targetRate);
+        }
+      };
     };
-    clientSocket.on("close", closeAll);
-    aiSocket.on("close", closeAll);
 
-  } catch (err) {
-    console.error("Realtime session error:", err);
-  }
-});
+    // --- Helpers ---
+    function floatTo16BitPCM(float32Array) {
+      const l = float32Array.length;
+      const int16 = new Int16Array(l);
+      for (let i = 0; i < l; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        int16[i] = s < 0 ? s*0x8000 : s*0x7fff;
+      }
+      return int16;
+    }
 
-server.listen(process.env.PORT || 3000, () => {
-  console.log(`AI receptionist demo running at http://localhost:${process.env.PORT || 3000}`);
-});
+    function int16ToBase64(int16Arr) {
+      const byteArray = new Uint8Array(int16Arr.buffer);
+      let binary = "";
+      const chunk = 0x8000;
+      for (let i=0;i<byteArray.length;i+=chunk) {
+        binary += String.fromCharCode.apply(null, byteArray.subarray(i,i+chunk));
+      }
+      return btoa(binary);
+    }
+
+    function base64ToInt16(b64) {
+      const binary = atob(b64);
+      const arr = new Int16Array(binary.length/2);
+      for (let i=0;i<arr.length;i++) {
+        arr[i] = (binary.charCodeAt(i*2+1)<<8) | binary.charCodeAt(i*2);
+      }
+      return arr;
+    }
+
+    function playPCM(int16Array, sampleRate) {
+      const float32 = new Float32Array(int16Array.length);
+      for (let i=0;i<int16Array.length;i++) float32[i] = int16Array[i]/32768;
+      const audioBuffer = audioCtx.createBuffer(1,float32.length,sampleRate);
+      audioBuffer.copyToChannel(float32,0);
+      const src = audioCtx.createBufferSource();
+      src.buffer = audioBuffer;
+      src.connect(audioCtx.destination);
+      src.start();
+    }
+
+    function resampleFloat32(input,inputRate,outputRate) {
+      if(inputRate===outputRate) return input;
+      const ratio=inputRate/outputRate;
+      const outLength=Math.round(input.length/ratio);
+      const out=new Float32Array(outLength);
+      for(let i=0;i<outLength;i++){
+        const pos=i*ratio;
+        const iPos=Math.floor(pos);
+        const frac=pos-iPos;
+        const s0=input[iPos]||0;
+        const s1=input[iPos+1]||0;
+        out[i]=s0+(s1-s0)*frac;
+      }
+      return out;
+    }
+  </script>
+</body>
+</html>
