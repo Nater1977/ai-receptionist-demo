@@ -1,5 +1,4 @@
 import express from "express";
-import path from "path";
 import { createServer } from "http";
 import { WebSocketServer } from "ws";
 import OpenAI from "openai";
@@ -28,44 +27,48 @@ Your job:
 Tone: friendly, professional, clear.
 `;
 
-const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Serve static test page
+// Serve frontend
 app.use(express.static("public"));
 
-// --- REALTIME WEBSOCKET BRIDGE ---
+// --- Realtime WebSocket bridge ---
 wss.on("connection", async (clientSocket) => {
   try {
-    // 1. Create a realtime session
+    // 1. Create Realtime session
     const session = await client.sessions.createRealtimeSession({
       model: "gpt-4o-realtime-preview-2024-12-17",
       instructions: SYSTEM_PROMPT,
       voice: "alloy",
-      modalities: ["text", "audio"],
+      modalities: ["audio", "text"],
     });
 
-    // 2. Connect to OpenAI's WebSocket using the returned URL
+    // 2. Connect to OpenAI WS
     const aiSocket = new WebSocket(session.websocket_url, {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      },
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     });
 
-    // 3. Relay OpenAI → Browser
+    // 3. Forward messages OpenAI → browser
     aiSocket.on("message", (msg) => {
-      clientSocket.send(msg);
+      if (clientSocket.readyState === WebSocket.OPEN) {
+        clientSocket.send(msg);
+      }
     });
 
-    // 4. Relay Browser → OpenAI
+    // 4. Forward messages browser → OpenAI
     clientSocket.on("message", (msg) => {
-      aiSocket.send(msg);
+      if (aiSocket.readyState === WebSocket.OPEN) {
+        aiSocket.send(msg);
+      }
     });
 
-    // 5. Clean up on disconnect
-    clientSocket.on("close", () => aiSocket.close());
-    aiSocket.on("close", () => clientSocket.close());
+    // 5. Cleanup on close
+    const closeAll = () => {
+      if (clientSocket.readyState === WebSocket.OPEN) clientSocket.close();
+      if (aiSocket.readyState === WebSocket.OPEN) aiSocket.close();
+    };
+    clientSocket.on("close", closeAll);
+    aiSocket.on("close", closeAll);
 
   } catch (err) {
     console.error("Realtime session error:", err);
@@ -73,7 +76,5 @@ wss.on("connection", async (clientSocket) => {
 });
 
 server.listen(process.env.PORT || 3000, () => {
-  console.log(
-    `AI receptionist demo running at http://localhost:${process.env.PORT || 3000}`
-  );
+  console.log(`AI receptionist demo running at http://localhost:${process.env.PORT || 3000}`);
 });
