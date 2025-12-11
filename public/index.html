@@ -8,12 +8,12 @@
   <button id="start">Start Receptionist</button>
 
   <script>
-    let audioCtx, ws, source, processor;
+    let audioCtx, ws, source, recorderNode;
     const targetRate = 24000;
 
     document.getElementById("start").onclick = async () => {
       audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      await audioCtx.resume(); // ensure AudioContext is running
+      await audioCtx.resume();
 
       // 1) Connect WebSocket
       ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host);
@@ -26,20 +26,21 @@
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
         source = audioCtx.createMediaStreamSource(stream);
 
-        // 3) Create ScriptProcessor (deprecated but works)
-        processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        // 3) Load AudioWorklet
+        await audioCtx.audioWorklet.addModule('recorder-processor.js');
+        recorderNode = new AudioWorkletNode(audioCtx, 'recorder-processor');
 
-        processor.onaudioprocess = (e) => {
-          if (ws.readyState !== WebSocket.OPEN) return;
-          const float32 = e.inputBuffer.getChannelData(0);
+        recorderNode.port.onmessage = (event) => {
+          const float32 = event.data;
           const resampled = resampleFloat32(float32, audioCtx.sampleRate, targetRate);
           const pcm16 = floatTo16BitPCM(resampled);
           const b64 = int16ToBase64(pcm16);
-          ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64 }));
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "input_audio_buffer.append", audio: b64 }));
+          }
         };
 
-        source.connect(processor);
-        processor.connect(audioCtx.destination);
+        source.connect(recorderNode).connect(audioCtx.destination);
 
         // 4) Periodically commit audio + request AI response
         setInterval(() => {
@@ -56,7 +57,6 @@
           try {
             const msg = JSON.parse(evt.data);
 
-            // Only handle AI audio messages
             if (msg.type?.startsWith("response.audio") && msg.audio) {
               const pcm16 = base64ToInt16(msg.audio);
               playPCM(pcm16, targetRate);
