@@ -35,22 +35,45 @@ const client = new OpenAI({
 // Serve static test page
 app.use(express.static("public"));
 
-// WebSocket for Realtime API
-wss.on("connection", async (ws) => {
-  const openai = await client.realtime.sessions.create({
-    model: "gpt-4o-realtime-preview-2024-12-17",
-    instructions: SYSTEM_PROMPT,
-    voice: "alloy",
-  });
+// --- REALTIME WEBSOCKET BRIDGE ---
+wss.on("connection", async (clientSocket) => {
+  try {
+    // 1. Create a realtime session
+    const session = await client.sessions.createRealtimeSession({
+      model: "gpt-4o-realtime-preview-2024-12-17",
+      instructions: SYSTEM_PROMPT,
+      voice: "alloy",
+      modalities: ["text", "audio"],
+    });
 
-  const ai_ws = client.realtime.connect(openai.id);
+    // 2. Connect to OpenAI's WebSocket using the returned URL
+    const aiSocket = new WebSocket(session.websocket_url, {
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      },
+    });
 
-  ai_ws.on("message", (msg) => ws.send(msg));
-  ws.on("message", (msg) => ai_ws.send(msg));
+    // 3. Relay OpenAI → Browser
+    aiSocket.on("message", (msg) => {
+      clientSocket.send(msg);
+    });
 
-  ws.on("close", () => ai_ws.close());
+    // 4. Relay Browser → OpenAI
+    clientSocket.on("message", (msg) => {
+      aiSocket.send(msg);
+    });
+
+    // 5. Clean up on disconnect
+    clientSocket.on("close", () => aiSocket.close());
+    aiSocket.on("close", () => clientSocket.close());
+
+  } catch (err) {
+    console.error("Realtime session error:", err);
+  }
 });
 
-server.listen(3000, () => {
-  console.log("AI receptionist demo running at http://localhost:3000");
+server.listen(process.env.PORT || 3000, () => {
+  console.log(
+    `AI receptionist demo running at http://localhost:${process.env.PORT || 3000}`
+  );
 });
