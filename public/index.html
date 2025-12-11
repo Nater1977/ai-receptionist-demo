@@ -51,22 +51,22 @@
 
       // 5) Play AI audio
       ws.onmessage = (evt) => {
-        if (typeof evt.data === "string") {
-          try {
-            const msg = JSON.parse(evt.data);
-            const b64 = msg?.delta || msg?.audio || null;
-            if (msg.type?.startsWith("response.audio") && b64) {
-              const pcm16 = base64ToInt16(b64);
-              playPCM(pcm16, targetRate);
-              return;
-            }
-          } catch {}
-        } else if (evt.data instanceof ArrayBuffer) {
-          const pcm16 = new Int16Array(evt.data);
-          playPCM(pcm16, targetRate);
-        }
-      };
-    };
+  if (typeof evt.data === "string") {
+    try {
+      const msg = JSON.parse(evt.data);
+
+      // Check if this is AI audio
+      if (msg.type?.startsWith("response.audio") && msg.audio) {
+        const pcm16 = base64ToInt16(msg.audio);
+        playPCM(pcm16, 24000);
+      }
+
+    } catch (err) {
+      console.error("Failed to parse WS message:", err);
+    }
+  }
+};
+
 
     // --- Helpers ---
     function floatTo16BitPCM(float32Array) {
