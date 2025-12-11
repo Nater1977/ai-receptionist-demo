@@ -7,7 +7,6 @@ const app = express();
 const server = createServer(app);
 const wss = new WebSocketServer({ server });
 
-// --- AI CONFIG ---
 const SYSTEM_PROMPT = `
 You are the AI receptionist for Checkered Flag Auto Center.
 
@@ -32,11 +31,11 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // Serve frontend
 app.use(express.static("public"));
 
-// --- Realtime WebSocket bridge ---
+// --- Realtime WS bridge ---
 wss.on("connection", async (clientSocket) => {
   try {
-    // 1. Create Realtime session
-    const session = await client.sessions.createRealtimeSession({
+    // 1. Create a Realtime session using latest SDK
+    const session = await client.realtime.sessions.create({
       model: "gpt-4o-realtime-preview-2024-12-17",
       instructions: SYSTEM_PROMPT,
       voice: "alloy",
@@ -48,21 +47,21 @@ wss.on("connection", async (clientSocket) => {
       headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
     });
 
-    // 3. Forward messages OpenAI → browser
+    // 3. Forward OpenAI → Browser
     aiSocket.on("message", (msg) => {
       if (clientSocket.readyState === WebSocket.OPEN) {
         clientSocket.send(msg);
       }
     });
 
-    // 4. Forward messages browser → OpenAI
+    // 4. Forward Browser → OpenAI
     clientSocket.on("message", (msg) => {
       if (aiSocket.readyState === WebSocket.OPEN) {
         aiSocket.send(msg);
       }
     });
 
-    // 5. Cleanup on close
+    // 5. Cleanup
     const closeAll = () => {
       if (clientSocket.readyState === WebSocket.OPEN) clientSocket.close();
       if (aiSocket.readyState === WebSocket.OPEN) aiSocket.close();
