@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Realtime Voice Test</title>
+</head>
+<body>
+  <h2>AI Voice Test (Client Only)</h2>
+  <button id="start">Start</button>
+
+  <script type="module">
+    import { RealtimeClient } from "https://cdn.jsdelivr.net/npm/@openai/realtime-client/+esm";
+
+    let audioCtx;
+    let recorderNode;
+    const targetRate = 24000;
+
+    document.getElementById("start").onclick = async () => {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      await audioCtx.resume();
+
+      // 🔑 Ask user for API key safely at runtime
+      const apiKey = prompt("Enter your OpenAI API Key:", "");
+      if (!apiKey) return alert("API key required.");
+
+      // 1) Connect to OpenAI realtime directly
+      const client = new RealtimeClient({
+        apiKey,
+        model: "gpt-4o-realtime-preview-2024-12-17",
+        debug: true
+      });
+
+      client.on("response.audio.delta", ({ delta }) => {
+        const pcm16 = base64ToInt16(delta);
+        playPCM(pcm16, targetRate);
+      });
+
+      await client.connect();
+      console.log("Connected to OpenAI realtime");
+
+      // 2) Start microphone capture
+      await audioCtx.audioWorklet.addModule("recorder-processor.js");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const source = audioCtx.createMediaStreamSource(stream);
+      recorderNode = new AudioWorkletNode(audioCtx, "recorder-processor");
+
+      recorderNode.port.onmessage = (evt) => {
+        const float32 = evt.data;
+        const resampled = resampleFloat32(float32, audioCtx.sampleRate, targetRate);
+        const pcm16 = floatTo16BitPCM(resampled);
+        const b64 = int16ToBase64(pcm16);
+
+        client.sendEvent({
+          type: "input_audio_buffer.append",
+          audio: b64
+        });
+      };
+
+      source.connect(recorderNode).connect(audioCtx.destination);
+
+      // 3) Commit + ask AI to respond every 1s
+      setInterval(() => {
+        client.sendEvent({ type: "input_audio_buffer.commit" });
+        client.sendEvent({
+          type: "response.create",
+          response: { modalities: ["audio"] }
+        });
+      }, 1000);
+    };
+
+    // --- Audio Helpers ---
+    function floatTo16BitPCM(float32Array) {
+      const int16 = new Int16Array(float32Array.length);
+      for (let i = 0; i < float32Array.length; i++) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        int16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return int16;
+    }
+
+    function int16ToBase64(int16Arr) {
+      return btoa(
+        String.fromCharCode.apply(
+          null,
+          new Uint8Array(int16Arr.buffer)
+        )
+      );
+    }
+
+    function base64ToInt16(b64) {
+      const binary = atob(b64);
+      const arr = new Int16Array(binary.length / 2);
+      for (let i = 0; i < arr.length; i++) {
+        arr[i] = (binary.charCodeAt(i * 2 + 1) << 8) | binary.charCodeAt(i * 2);
+      }
+      return arr;
+    }
+
+    function playPCM(int16Array, sampleRate) {
+      const float32 = new Float32Array(int16Array.length);
+      for (let i = 0; i < int16Array.length; i++) float32[i] = int16Array[i] / 32768;
+
+      const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+      audioBuffer.copyToChannel(float32, 0);
+
+      const src = audioCtx.createBufferSource();
+      src.buffer = audioBuffer;
+      src.connect(audioCtx.destination);
+      src.start();
+    }
+
+    // resampler
+    function resampleFloat32(input, inputRate, outputRate) {
+      if (inputRate === outputRate) return input;
+      const ratio = inputRate / outputRate;
+      const outLength = Math.round(input.length / ratio);
+      const out = new Float32Array(outLength);
+
+      for (let i = 0; i < outLength; i++) {
+        const pos = i * ratio;
+        const iPos = Math.floor(pos);
+        const frac = pos - iPos;
+        const s0 = input[iPos] || 0;
+        const s1 = input[iPos + 1] || 0;
+        out[i] = s0 + (s1 - s0) * frac;
+      }
+      return out;
+    }
+  </script>
+</body>
+</html>
